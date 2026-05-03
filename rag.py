@@ -1,7 +1,7 @@
 from groq import Groq
 from embeddings import query_similar
 
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "add_key"
 
 client = Groq(api_key=GROQ_API_KEY)
 
