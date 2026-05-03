@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Hospital RAG System</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+
+<div class="layout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="logo">
+            <span class="logo-icon">⚕</span>
+            <span class="logo-text">MediRAG</span>
+        </div>
+        <nav class="nav">
+            <button class="nav-item active" onclick="showPanel('upload', this)">
+                <span class="nav-icon">📁</span> Upload
+            </button>
+            <button class="nav-item" onclick="showPanel('dashboard', this)">
+                <span class="nav-icon">📊</span> Dashboard
+            </button>
+            <button class="nav-item" onclick="showPanel('chat', this)">
+                <span class="nav-icon">💬</span> Chat
+            </button>
+            <button class="nav-item" onclick="showPanel('risk', this)">
+                <span class="nav-icon">🔍</span> Risk Detection
+            </button>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="session-status"
+                 hx-get="/status"
+                 hx-trigger="load, every 10s"
+                 hx-swap="innerHTML">
+                <span class="loading-text">Checking session...</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+
+        <!-- Upload Panel -->
+        <div id="panel-upload" class="panel active">
+            <div class="panel-header">
+                <h1>Upload Patient Data</h1>
+                <p class="subtitle">Upload a hospital CSV file to begin. AI will clean and embed the data automatically.</p>
+            </div>
+
+            <div class="upload-zone" id="upload-zone">
+                <form id="upload-form"
+                      hx-post="/upload"
+                      hx-target="#main-content"
+                      hx-swap="innerHTML"
+                      hx-encoding="multipart/form-data"
+                      hx-indicator="#spinner">
+                    <div class="drop-area" onclick="document.getElementById('csv-input').click()">
+                        <div class="drop-icon">📂</div>
+                        <p class="drop-text">Click to select a CSV file</p>
+                        <p class="drop-sub">Hospital patient records (.csv)</p>
+                        <input type="file" id="csv-input" name="file" accept=".csv"
+                               style="display:none"
+                               onchange="handleFileSelect(this)"/>
+                    </div>
+                    <div id="file-chosen" class="file-chosen" style="display:none">
+                        <span id="file-name-display"></span>
+                        <button type="submit" class="btn btn-primary">
+                            Upload &amp; Analyze →
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Spinner -->
+            <div id="spinner" class="spinner htmx-indicator">
+                <div class="spinner-ring"></div>
+                <p>Processing file...</p>
+            </div>
+
+            <!-- Results land here -->
+            <div id="main-content"></div>
+        </div>
+
+        <!-- Dashboard Panel -->
+        <div id="panel-dashboard" class="panel">
+            <div class="panel-header">
+                <h1>Dashboard</h1>
+                <p class="subtitle">Key metrics from the patient dataset.</p>
+                <button class="btn btn-primary" style="margin-top:10px; font-size:12px;"
+                        hx-get="/dashboard"
+                        hx-target="#dashboard-content"
+                        hx-swap="innerHTML"
+                        hx-indicator="#spinner">
+                    ↻ Refresh
+                </button>
+            </div>
+            <div id="dashboard-content"
+                 hx-get="/dashboard"
+                 hx-trigger="load"
+                 hx-swap="innerHTML">
+                <div class="placeholder-card">
+                    <p>📊 Loading dashboard...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Panel -->
+        <div id="panel-chat" class="panel">
+            <div class="panel-header">
+                <h1>RAG Chatbot</h1>
+                <p class="subtitle">Query your patient data using natural language.</p>
+            </div>
+            <div class="chat-container">
+                <div id="chat-messages" class="chat-messages">
+                    <div class="chat-bubble system">
+                        Hello! Ask me anything about the patient data. E.g. "How many patients have diabetes?" or "What is the average age?"
+                    </div>
+                </div>
+                <div class="chat-input-row">
+                    <input type="text" id="chat-input" class="chat-input"
+                           placeholder="Ask a question about the patients..."
+                           onkeydown="if(event.key==='Enter') sendChat()"/>
+                    <button class="btn btn-primary" onclick="sendChat()">Send</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Risk Panel -->
+        <div id="panel-risk" class="panel">
+            <div class="panel-header">
+                <h1>Risk Detection</h1>
+                <p class="subtitle">Select a patient to generate an AI risk assessment.</p>
+            </div>
+            <div class="risk-select-row">
+                <select id="patient-select" class="patient-select">
+                    <option value="">-- Load patients first --</option>
+                </select>
+                <button class="btn btn-primary" style="background:var(--bg3); border:1px solid var(--border);"
+                        onclick="loadPatients()">
+                    ↻ Load Patients
+                </button>
+                <button class="btn btn-primary"
+                        onclick="loadRisk()">
+                    Analyze Risk →
+                </button>
+            </div>
+            <div id="risk-result"></div>
+        </div>
+
+    </main>
+</div>
+
+<script>
+    function showPanel(name, btn) {
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+        document.getElementById('panel-' + name).classList.add('active');
+        btn.classList.add('active');
+    }
+
+    function handleFileSelect(input) {
+        if (input.files && input.files[0]) {
+            document.getElementById('file-name-display').textContent = '📄 ' + input.files[0].name;
+            document.getElementById('file-chosen').style.display = 'flex';
+        }
+    }
+
+    function sendChat() {
+        const input = document.getElementById('chat-input');
+        const msg = input.value.trim();
+        if (!msg) return;
+
+        const messages = document.getElementById('chat-messages');
+
+        // User bubble
+        messages.innerHTML += `<div class="chat-bubble user">${msg}</div>`;
+
+        // Typing indicator
+        const typingId = 'typing-' + Date.now();
+        messages.innerHTML += `
+            <div class="chat-bubble system" id="${typingId}">
+                <div class="typing-dots"><span></span><span></span><span></span></div>
+            </div>`;
+        input.value = '';
+        messages.scrollTop = messages.scrollHeight;
+
+        fetch('/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({question: msg})
+        })
+        .then(r => r.json())
+        .then(data => {
+            const bubble = document.getElementById(typingId);
+            if (bubble) {
+                bubble.outerHTML = `<div class="chat-bubble system">${data.html || data.answer}</div>`;
+            }
+            messages.scrollTop = messages.scrollHeight;
+        })
+        .catch(err => {
+            const bubble = document.getElementById(typingId);
+            if (bubble) {
+                bubble.outerHTML = `<div class="chat-bubble system error">Connection error. Try again.</div>`;
+            }
+        });
+    }
+
+    function loadPatients() {
+        const select = document.getElementById('patient-select');
+        select.innerHTML = '<option>Loading...</option>';
+        fetch('/patients')
+            .then(r => r.text())
+            .then(html => {
+                if (html.includes('No data loaded') || html.trim() === '') {
+                    select.innerHTML = '<option value="">No data — preprocess a file first</option>';
+                } else {
+                    select.innerHTML = '<option value="">-- Select a patient --</option>' + html;
+                }
+            })
+            .catch(() => {
+                select.innerHTML = '<option value="">Error loading patients</option>';
+            });
+    }
+
+    function loadRisk() {
+        const select = document.getElementById('patient-select');
+        const pid = select.value;
+        if (!pid) {
+            alert('Please load and select a patient first.');
+            return;
+        }
+        const result = document.getElementById('risk-result');
+        result.innerHTML = '<div class="placeholder-card">🔍 Analyzing patient risk... this may take 10-20 seconds.</div>';
+        fetch(`/risk?patient_id=${encodeURIComponent(pid)}`)
+            .then(r => r.text())
+            .then(html => { result.innerHTML = html; })
+            .catch(() => {
+                result.innerHTML = '<div class="placeholder-card" style="color:var(--red);">Request failed. Try again.</div>';
+            });
+    }
+</script>
+</body>
+</html>
