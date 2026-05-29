@@ -1,13 +1,36 @@
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from typing import List, Optional
 import pandas as pd
 import shutil
 import os
 import json
 
 app = FastAPI()
+
+
+# ── Pydantic response models ─────────────────────────────────────────────
+
+class PreprocessResponse(BaseModel):
+    """Structured response for the /preprocess endpoint."""
+    success: bool
+    message: str
+    filename: str
+    original_shape: List[int]
+    cleaned_shape: List[int]
+    patient_id_col: Optional[str]
+    columns_used: List[str]
+    dropped_columns: List[str]
+    vital_columns: List[str]
+    date_columns: List[str]
+    num_patient_chunks: int
+    num_nice_chunks: int
+    total_chunks: int
+    guidelines_loaded: List[str]
+    sample_patient_ids: List[str]
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -67,67 +90,102 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
     ))
 
 
-@app.post("/preprocess", response_class=HTMLResponse)
-async def preprocess(request: Request):
-    if "current_file" not in session_store:
-        return HTMLResponse(content=_error_card("No file uploaded yet."))
+@app.post("/preprocess", response_model=PreprocessResponse)
+async def preprocess(file: UploadFile = File(...)):
+    """
+    Full preprocessing + hybrid embedding pipeline.
+
+    Accepts an uploaded patient CSV and:
+      1. Cleans it (drop sparse columns, detect IDs/vitals/dates, fill gaps).
+      2. Loads + chunks the NICE guidelines from ``guidelines/``.
+      3. Builds a hybrid ChromaDB vector store (patient rows + NICE chunks).
+
+    Returns a structured JSON summary of the run.
+    """
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    # Save the uploaded file locally.
+    file_path = os.path.join(DATA_DIR, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
     try:
-        from preprocessing import preprocess_dataframe
-        from embeddings import embed_and_store
+        df = pd.read_csv(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
 
-        file_path = session_store["current_file"]
+    if df.empty:
+        raise HTTPException(status_code=400, detail="Uploaded CSV has no rows.")
 
-        # Run preprocessing
-        result = preprocess_dataframe(file_path)
+    try:
+        from preprocessing import preprocess_patient_data
+        from guidelines_loader import load_nice_guidelines
+        from embeddings import build_hybrid_vectorstore
 
-        # Store key info in session
-        session_store["preprocessed"] = True
-        session_store["patient_id_col"] = result["patient_id_col"]
-        session_store["patient_ids"] = result["patient_ids"]
-        session_store["important_cols"] = result["important_cols"]
-        session_store["descriptions"] = result["descriptions"]
-        session_store["dropped_cols"] = result["dropped_cols"]
-        session_store["kept_cols"] = result["kept_cols"]
-        session_store["cleaned_shape"] = result["cleaned_shape"]
+        # 1. Clean + analyse the patient data.
+        cleaned_df, meta = preprocess_patient_data(df)
 
-        # Save cleaned df
+        # Persist the cleaned CSV for downstream modules (risk, dashboard).
         cleaned_path = file_path.replace(".csv", "_cleaned.csv")
-        result["df"].to_csv(cleaned_path, index=False)
-        session_store["cleaned_file"] = cleaned_path
+        cleaned_df.to_csv(cleaned_path, index=False)
 
-        # Build metadata list for ChromaDB
-        df = result["df"]
-        metadata_rows = []
-        for _, row in df.iterrows():
-            meta = {}
-            for col in df.columns[:20]:  # ChromaDB metadata limit
-                val = row[col]
-                meta[col] = str(val) if not isinstance(val, (int, float, bool)) else val
-            metadata_rows.append(meta)
+        # 2. Load NICE guideline chunks.
+        nice_documents = load_nice_guidelines("guidelines")
+        guidelines_loaded = sorted({
+            d.metadata.get("guideline_name", "unknown") for d in nice_documents
+        })
 
-        # Embed and store
-        total_stored = embed_and_store(
-            passages=result["passages"],
-            patient_ids=result["patient_ids"],
-            metadata_rows=metadata_rows
+        # 3. Build the hybrid vector store.
+        stats = build_hybrid_vectorstore(
+            patient_df=cleaned_df,
+            nice_documents=nice_documents,
+            patient_id_col=meta["patient_id_col"],
         )
 
-        return HTMLResponse(content=_preprocess_success_card(
-            original_shape=result["original_shape"],
-            cleaned_shape=result["cleaned_shape"],
-            dropped_cols=result["dropped_cols"],
-            kept_cols=result["kept_cols"],
-            patient_id_col=result["patient_id_col"],
-            important_cols=result["important_cols"],
-            descriptions=result["descriptions"],
-            total_embedded=total_stored
-        ))
+        # Populate session state so chat / dashboard / risk endpoints work.
+        session_store.update({
+            "current_file": file_path,
+            "filename": file.filename,
+            "cleaned_file": cleaned_path,
+            "preprocessed": True,
+            "patient_id_col": meta["patient_id_col"],
+            "patient_ids": meta["patient_ids"],
+            "important_cols": meta["vital_cols"] + (
+                [meta["patient_id_col"]] if meta["patient_id_col"] else []
+            ),
+            "descriptions": {},
+            "dropped_cols": meta["dropped_cols"],
+            "kept_cols": meta["kept_cols"],
+            "cleaned_shape": meta["cleaned_shape"],
+        })
 
+        return PreprocessResponse(
+            success=True,
+            message="Preprocessing and hybrid embedding completed successfully.",
+            filename=file.filename,
+            original_shape=list(meta["original_shape"]),
+            cleaned_shape=list(meta["cleaned_shape"]),
+            patient_id_col=meta["patient_id_col"],
+            columns_used=meta["kept_cols"],
+            dropped_columns=meta["dropped_cols"],
+            vital_columns=meta["vital_cols"],
+            date_columns=meta["date_cols"],
+            num_patient_chunks=stats["patient_chunks"],
+            num_nice_chunks=stats["nice_chunks"],
+            total_chunks=stats["total_chunks"],
+            guidelines_loaded=guidelines_loaded,
+            sample_patient_ids=meta["sample_patient_ids"],
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
-        tb = traceback.format_exc()
-        return HTMLResponse(content=_error_card(f"Preprocessing failed: {str(e)}<br><pre>{tb}</pre>"))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Preprocessing failed: {e}\n{traceback.format_exc()}",
+        )
 
 
 @app.get("/status", response_class=HTMLResponse)

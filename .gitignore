@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Generated vector store (rebuilt by /preprocess)
+chroma_db/
+_tmp_chroma/
+
+# Generated cleaned data
+data/*_cleaned.csv
+
+# Local scratch / test files
+_*.py
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
