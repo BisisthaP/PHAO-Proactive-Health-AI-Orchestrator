@@ -110,9 +110,14 @@
 
         <!-- Chat Panel -->
         <div id="panel-chat" class="panel">
-            <div class="panel-header">
-                <h1>RAG Chatbot</h1>
-                <p class="subtitle">Query your patient data using natural language.</p>
+            <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                <div>
+                    <h1>RAG Chatbot</h1>
+                    <p class="subtitle">Query your patient data using natural language.</p>
+                </div>
+                <button class="btn btn-secondary" style="background: var(--bg2); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; font-size: 12px; cursor: pointer; border-radius: var(--radius); display: flex; align-items: center; gap: 6px;" onclick="clearChatHistory()">
+                    🗑️ Clear History
+                </button>
             </div>
             <div class="chat-container">
                 <div id="chat-messages" class="chat-messages">
@@ -160,6 +165,51 @@
         document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
         document.getElementById('panel-' + name).classList.add('active');
         btn.classList.add('active');
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        loadChatHistory();
+    });
+
+    function loadChatHistory() {
+        const messages = document.getElementById('chat-messages');
+        fetch('/chat')
+            .then(r => r.json())
+            .then(data => {
+                if (data.history && data.history.length > 0) {
+                    let html = `<div class="chat-bubble system">
+                        Hello! Ask me anything about the patient data. E.g. "How many patients have diabetes?" or "What is the average age?"
+                    </div>`;
+                    data.history.forEach(msg => {
+                        if (msg.role === 'user') {
+                            html += `<div class="chat-bubble user">${msg.content}</div>`;
+                        } else {
+                            html += `<div class="chat-bubble system">${msg.html || msg.content}</div>`;
+                        }
+                    });
+                    messages.innerHTML = html;
+                    messages.scrollTop = messages.scrollHeight;
+                }
+            })
+            .catch(err => {
+                console.error("Error loading chat history:", err);
+            });
+    }
+
+    function clearChatHistory() {
+        if (!confirm("Are you sure you want to clear your chat history?")) return;
+        fetch('/chat/clear', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                const messages = document.getElementById('chat-messages');
+                messages.innerHTML = `<div class="chat-bubble system">
+                    Hello! Ask me anything about the patient data. E.g. "How many patients have diabetes?" or "What is the average age?"
+                </div>`;
+            })
+            .catch(err => {
+                console.error("Error clearing chat history:", err);
+                alert("Failed to clear chat history.");
+            });
     }
 
     function handleFileSelect(input) {
