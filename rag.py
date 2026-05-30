@@ -449,7 +449,7 @@ def build_context_text(nice_docs: list, patient_docs: list) -> str:
 
 # ── Full Hybrid RAG Pipeline ──────────────────────────────────────
 
-def rag_query(question: str, n_results: int = 8) -> dict:
+def rag_query(question: str, patient_id: str = None, n_results: int = 8) -> dict:
     """
     Advanced Hybrid RAG Pipeline:
     1. Lazy initialization: Verify NICE guidelines are indexed in ChromaDB.
@@ -457,7 +457,8 @@ def rag_query(question: str, n_results: int = 8) -> dict:
     3. Document Budgeting: Allocate slots to NICE guidelines vs Patient records dynamically.
     4. Retrievals: Run hybrid RRF searches with metadata filtering for guidelines and patient records.
     5. Synthesis: Construct structured prompt and call Groq LLaMA-3.3 (with Gemini 2.5 fallback).
-    6. Return: Answer, structured sources list, and metrics.
+    6. Confidence: Calculates a numeric certainty metric from 0.0 to 1.0.
+    7. Return: Answer, structured sources list, confidence, and metrics.
     """
     # Step 1: Ensure NICE Guidelines are indexed
     index_nice_guidelines()
@@ -465,7 +466,11 @@ def rag_query(question: str, n_results: int = 8) -> dict:
     # Step 2: Extract Intent and Filters
     intent = parse_clinical_intent(question)
     is_clinical = intent.get("is_clinical_recommendation", False)
-    patient_id = intent.get("patient_id")
+    
+    # Overwrite parsed patient ID with explicitly passed patient_id if provided
+    if patient_id is None:
+        patient_id = intent.get("patient_id")
+        
     nice_filters = intent.get("nice_guideline_filters", [])
     patient_filters = intent.get("patient_metadata_filters")
     dense_query = intent.get("dense_query", question)
@@ -578,10 +583,26 @@ Provide a clinical, fact-grounded synthesis answer based on this context. Ensure
             "text": doc["document"]
         })
 
+    # Step 7: Calculate Evidence-Based Confidence Score (0.0 to 1.0)
+    retrieved_count = len(selected_nice) + len(selected_patient)
+    if retrieved_count == 0:
+        confidence = 0.0
+    else:
+        # Cosine similarity is 1.0 - distance (distances are typically 0.0 to 1.0)
+        similarities = [1.0 - max(0.0, min(1.0, doc.get("dense_score", 0.5))) for doc in (selected_nice + selected_patient)]
+        avg_sim = sum(similarities) / len(similarities) if similarities else 0.5
+        
+        # Boost confidence based on guideline and patient coverage
+        nice_bonus = 0.15 if selected_nice else 0.0
+        patient_bonus = 0.10 if selected_patient else 0.0
+        
+        confidence = round(max(0.1, min(0.99, avg_sim + nice_bonus + patient_bonus)), 2)
+
     return {
         "answer": answer,
         "sources": sources,
-        "retrieved_count": len(selected_nice) + len(selected_patient),
+        "confidence": confidence,
+        "retrieved_count": retrieved_count,
         "nice_count": len(selected_nice),
         "patient_count": len(selected_patient)
     }

@@ -5,8 +5,9 @@ from fastapi.templating import Jinja2Templates
 import pandas as pd
 import shutil
 import os
-import json
 from dotenv import load_dotenv
+
+from rag import rag_query, format_answer_html
 
 load_dotenv()
 
@@ -164,22 +165,54 @@ async def dashboard(request: Request):
 @app.post("/chat")
 async def chat(request: Request):
     if not session_store.get("preprocessed"):
-        return JSONResponse({"answer": "Please upload and preprocess a file first.", "html": '<div class="rag-answer">Please upload and preprocess a file first.</div>'})
+        return JSONResponse({
+            "answer": "Please upload and preprocess a file first.",
+            "sources": [],
+            "confidence": 0.0,
+            "html": '<div class="rag-answer">Please upload and preprocess a file first.</div>'
+        })
     try:
         body = await request.json()
-        question = body.get("question", "").strip()
-        if not question:
-            return JSONResponse({"answer": "Please enter a question.", "html": ""})
 
-        from rag import rag_query, format_answer_html
-        result = rag_query(question)
+        # Support both 'query' and 'question' parameters
+        question = body.get("query") or body.get("question") or ""
+        question = str(question).strip()
+
+        # Support optional patient_id
+        patient_id = body.get("patient_id") or body.get("patientId")
+        if patient_id:
+            patient_id = str(patient_id).strip()
+
+        if not question:
+            return JSONResponse({
+                "answer": "Please enter a question.",
+                "sources": [],
+                "confidence": 0.0,
+                "html": ""
+            })
+
+        # Run hybrid RAG query with optional patient ID
+        result = rag_query(question, patient_id=patient_id)
+
+        # Generate the visual HTML format
         html = format_answer_html(result)
-        return JSONResponse({"answer": result["answer"], "html": html})
+
+        return JSONResponse({
+            "answer": result["answer"],
+            "sources": result["sources"],
+            "confidence": result.get("confidence", 0.8),
+            "html": html
+        })
 
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        return JSONResponse({"answer": f"Error: {str(e)}", "html": f'<div class="rag-answer" style="color:var(--red);">{str(e)}<br><pre>{tb}</pre></div>'})
+        return JSONResponse({
+            "answer": f"Error: {str(e)}",
+            "sources": [],
+            "confidence": 0.0,
+            "html": f'<div class="rag-answer" style="color:var(--red);">{str(e)}<br><pre>{tb}</pre></div>'
+        })
 
 
 @app.get("/patients", response_class=HTMLResponse)
