@@ -449,22 +449,110 @@ def build_context_text(nice_docs: list, patient_docs: list) -> str:
 
 # ── Full Hybrid RAG Pipeline ──────────────────────────────────────
 
-def rag_query(question: str, patient_id: str = None, n_results: int = 8) -> dict:
+# ── Chat History & Session Management ─────────────────────────────
+
+chat_histories = {}
+
+def get_history(session_id: str) -> list:
+    """Retrieve last 5 messages for a specific session."""
+    if not session_id:
+        return []
+    if session_id not in chat_histories:
+        chat_histories[session_id] = []
+    return chat_histories[session_id][-5:]
+
+
+def store_message(session_id: str, role: str, content: str, html: str = None):
+    """Store a message in the session history, keeping only the last 5 messages."""
+    if not session_id:
+        return
+    if session_id not in chat_histories:
+        chat_histories[session_id] = []
+        
+    msg = {"role": role, "content": content}
+    if html is not None:
+        msg["html"] = html
+    chat_histories[session_id].append(msg)
+    
+    # Cap history at last 5 messages
+    if len(chat_histories[session_id]) > 5:
+        chat_histories[session_id] = chat_histories[session_id][-5:]
+
+
+def clear_history(session_id: str):
+    """Clear chat history for a session."""
+    if not session_id:
+        return
+    if session_id in chat_histories:
+        chat_histories[session_id] = []
+
+
+def rewrite_query_with_history(question: str, history: list) -> str:
+    """Uses LLM to resolve clinical co-references and generate a standalone search query."""
+    if not history:
+        return question
+        
+    # Format recent history for the rewriter
+    history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history[-4:]])
+    
+    prompt = f"""You are an expert clinical query rewriter. Analyze this conversation history and the follow-up question.
+    Rewrite the follow-up question to be a STANDALONE medical query that contains all necessary patient IDs, terms, and clinical context, suitable for a database search.
+    
+    Conversation History:
+    {history_text}
+    
+    Follow-up Question: {question}
+    
+    Rules:
+    - If the follow-up question is already a complete, standalone question, return it EXACTLY.
+    - If the follow-up question refers to "he", "she", "their", "them", "this patient", or "the guidelines", replace them with the actual patient ID or clinical diagnosis from the history.
+    - Return ONLY the final standalone question. Do NOT include markdown fences, comments, or explanations.
+    
+    Standalone Query:"""
+    
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are a standalone clinical query generator."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=100
+        )
+        rewritten = response.choices[0].message.content.strip()
+        print(f"[rag] Rewritten clinical query: '{question}' -> '{rewritten}'")
+        return rewritten
+    except Exception as e:
+        print(f"[rag] Query rewriting failed: {e}. Using original question.")
+        return question
+
+
+# ── Full Hybrid RAG Pipeline ──────────────────────────────────────
+
+def rag_query(question: str, patient_id: str = None, session_id: str = None, n_results: int = 8) -> dict:
     """
     Advanced Hybrid RAG Pipeline:
     1. Lazy initialization: Verify NICE guidelines are indexed in ChromaDB.
-    2. Intent Parser: Call Groq/Gemini to extract clinical intent, patient IDs, and metadata filters.
-    3. Document Budgeting: Allocate slots to NICE guidelines vs Patient records dynamically.
-    4. Retrievals: Run hybrid RRF searches with metadata filtering for guidelines and patient records.
-    5. Synthesis: Construct structured prompt and call Groq LLaMA-3.3 (with Gemini 2.5 fallback).
-    6. Confidence: Calculates a numeric certainty metric from 0.0 to 1.0.
-    7. Return: Answer, structured sources list, confidence, and metrics.
+    2. Session history retrieval: Fetch conversation context if session_id is provided.
+    3. Query Re-writing: Resolve co-references to create an optimal standalone search term.
+    4. Intent Parser: Extract clinical intent, patient IDs, and metadata filters.
+    5. Document Budgeting: Allocate slots to NICE guidelines vs Patient records dynamically.
+    6. Retrievals: Run hybrid RRF searches with metadata filtering for guidelines and patient records.
+    7. Synthesis: Construct structured prompt, append chat history, and call Groq LLaMA-3.3.
+    8. Confidence: Calculates a numeric certainty metric from 0.0 to 1.0.
+    9. Store Message: Appends the turn to the session history.
+    10. Return: Answer, structured sources list, confidence, and metrics.
     """
     # Step 1: Ensure NICE Guidelines are indexed
     index_nice_guidelines()
     
-    # Step 2: Extract Intent and Filters
-    intent = parse_clinical_intent(question)
+    # Step 2: Fetch history and rewrite query to resolve pronouns/references
+    history = get_history(session_id)
+    search_query = rewrite_query_with_history(question, history)
+    
+    # Step 3: Extract Intent and Filters
+    intent = parse_clinical_intent(search_query)
     is_clinical = intent.get("is_clinical_recommendation", False)
     
     # Overwrite parsed patient ID with explicitly passed patient_id if provided
@@ -473,13 +561,13 @@ def rag_query(question: str, patient_id: str = None, n_results: int = 8) -> dict
         
     nice_filters = intent.get("nice_guideline_filters", [])
     patient_filters = intent.get("patient_metadata_filters")
-    dense_query = intent.get("dense_query", question)
+    dense_query = intent.get("dense_query", search_query)
     sparse_keywords = intent.get("sparse_keywords", [])
     
     if not sparse_keywords:
-        sparse_keywords = [w for w in question.split() if len(w) > 4]
+        sparse_keywords = [w for w in search_query.split() if len(w) > 4]
 
-    # Step 3: Document Budget Allocation
+    # Step 4: Document Budget Allocation
     try:
         from embeddings import collection_count
         patient_count = collection_count()
@@ -498,7 +586,7 @@ def rag_query(question: str, patient_id: str = None, n_results: int = 8) -> dict
         n_patient = max(5, int(n_results * 0.65))
         n_nice = max(2, n_results - n_patient)
 
-    # Step 4: Perform Retrievals
+    # Step 5: Perform Retrievals
     nice_candidates = get_nice_candidates(
         dense_query=dense_query,
         sparse_terms=sparse_keywords,
@@ -526,7 +614,7 @@ def rag_query(question: str, patient_id: str = None, n_results: int = 8) -> dict
     selected_nice = nice_candidates[:n_nice]
     selected_patient = patient_candidates[:n_patient]
     
-    # Step 5: Synthesize and Call LLM
+    # Step 6: Synthesize and Call LLM
     context = build_context_text(selected_nice, selected_patient)
     
     prompt = f"""Here is the retrieved clinical evidence and dataset context:
@@ -537,14 +625,20 @@ User question: {question}
 
 Provide a clinical, fact-grounded synthesis answer based on this context. Ensure that all claims, targets, and guidelines are cited like [NICE NG28, p. 5], and all patient data is cited like [Patient ID: 104]. Let's think step by step to ensure absolute accuracy."""
 
+    # Construct the message history array
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Only append raw user/assistant messages to avoid prompt clutter
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+        
+    messages.append({"role": "user", "content": prompt})
+
     answer = ""
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
+            messages=messages,
             temperature=0.2,
             max_tokens=800
         )
@@ -557,12 +651,18 @@ Provide a clinical, fact-grounded synthesis answer based on this context. Ensure
                 model_name="gemini-2.5-flash",
                 system_instruction=SYSTEM_PROMPT
             )
-            response = model.generate_content(prompt)
+            # Standardize system prompt usage for Gemini fallback with history
+            gemini_messages = [{"role": "user", "parts": [SYSTEM_PROMPT]}]
+            for msg in history:
+                gemini_messages.append({"role": "user" if msg["role"] == "user" else "model", "parts": [msg["content"]]})
+            gemini_messages.append({"role": "user", "parts": [prompt]})
+            
+            response = model.generate_content(gemini_messages)
             answer = response.text.strip()
         except Exception as ex:
             answer = f"RAG LLM synthesis error: {str(ex)}"
 
-    # Step 6: Prepare Sources Output
+    # Step 7: Prepare Sources Output
     sources = []
     for doc in selected_nice:
         meta = doc["metadata"]
@@ -583,7 +683,7 @@ Provide a clinical, fact-grounded synthesis answer based on this context. Ensure
             "text": doc["document"]
         })
 
-    # Step 7: Calculate Evidence-Based Confidence Score (0.0 to 1.0)
+    # Step 8: Calculate Evidence-Based Confidence Score (0.0 to 1.0)
     retrieved_count = len(selected_nice) + len(selected_patient)
     if retrieved_count == 0:
         confidence = 0.0
@@ -597,6 +697,19 @@ Provide a clinical, fact-grounded synthesis answer based on this context. Ensure
         patient_bonus = 0.10 if selected_patient else 0.0
         
         confidence = round(max(0.1, min(0.99, avg_sim + nice_bonus + patient_bonus)), 2)
+
+    # Step 9: Store exchange in history (after generating response successfully)
+    result_dict = {
+        "answer": answer,
+        "sources": sources,
+        "confidence": confidence,
+        "retrieved_count": retrieved_count,
+        "nice_count": len(selected_nice),
+        "patient_count": len(selected_patient)
+    }
+    html = format_answer_html(result_dict)
+    store_message(session_id, "user", question)
+    store_message(session_id, "assistant", answer, html=html)
 
     return {
         "answer": answer,

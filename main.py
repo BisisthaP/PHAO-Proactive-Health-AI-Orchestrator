@@ -162,47 +162,86 @@ async def dashboard(request: Request):
         return HTMLResponse(content=f'<div class="placeholder-card" style="color:var(--red);">Dashboard error: {e}<br><pre>{traceback.format_exc()}</pre></div>')
 
 
+@app.get("/chat")
+async def get_chat_history(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return JSONResponse({"history": []})
+    
+    from rag import get_history
+    history = get_history(session_id)
+    return JSONResponse({"history": history, "session_id": session_id})
+
+
+@app.post("/chat/clear")
+async def clear_chat(request: Request):
+    session_id = request.cookies.get("session_id")
+    if session_id:
+        from rag import clear_history
+        clear_history(session_id)
+    return JSONResponse({"status": "success", "message": "Chat history cleared."})
+
+
 @app.post("/chat")
 async def chat(request: Request):
     if not session_store.get("preprocessed"):
         return JSONResponse({
-            "answer": "Please upload and preprocess a file first.",
+            "answer": "Please upload and preprocess a file first.", 
             "sources": [],
             "confidence": 0.0,
-            "html": '<div class="rag-answer">Please upload and preprocess a file first.</div>'
+            "html": '<div class="rag-answer">Please upload and preprocess a file first.</div>',
+            "history": []
         })
     try:
         body = await request.json()
-
+        
         # Support both 'query' and 'question' parameters
         question = body.get("query") or body.get("question") or ""
         question = str(question).strip()
-
+        
         # Support optional patient_id
         patient_id = body.get("patient_id") or body.get("patientId")
         if patient_id:
             patient_id = str(patient_id).strip()
-
+            
+        # Support session based conversation history
+        session_id = body.get("session_id") or body.get("sessionId") or request.cookies.get("session_id")
+        if not session_id:
+            import uuid
+            session_id = f"sess_{uuid.uuid4()}"
+            
         if not question:
+            from rag import get_history
             return JSONResponse({
                 "answer": "Please enter a question.",
                 "sources": [],
                 "confidence": 0.0,
-                "html": ""
+                "html": "",
+                "history": get_history(session_id)
             })
 
-        # Run hybrid RAG query with optional patient ID
-        result = rag_query(question, patient_id=patient_id)
-
+        from rag import rag_query, format_answer_html, get_history
+        
+        # Run hybrid RAG query with optional patient ID and session ID for history
+        result = rag_query(question, patient_id=patient_id, session_id=session_id)
+        
         # Generate the visual HTML format
         html = format_answer_html(result)
-
-        return JSONResponse({
+        
+        # Retrieve the updated history
+        history = get_history(session_id)
+        
+        response = JSONResponse({
             "answer": result["answer"],
             "sources": result["sources"],
             "confidence": result.get("confidence", 0.8),
-            "html": html
+            "html": html,
+            "history": history
         })
+        
+        # Store the session ID in client cookie to maintain thread memory
+        response.set_cookie(key="session_id", value=session_id, max_age=3600*24, httponly=True, samesite="lax")
+        return response
 
     except Exception as e:
         import traceback
@@ -211,7 +250,8 @@ async def chat(request: Request):
             "answer": f"Error: {str(e)}",
             "sources": [],
             "confidence": 0.0,
-            "html": f'<div class="rag-answer" style="color:var(--red);">{str(e)}<br><pre>{tb}</pre></div>'
+            "html": f'<div class="rag-answer" style="color:var(--red);">{str(e)}<br><pre>{tb}</pre></div>',
+            "history": []
         })
 
 
