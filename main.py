@@ -6,6 +6,9 @@ import pandas as pd
 import shutil
 import os
 import json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -22,7 +25,7 @@ session_store = {}
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 @app.post("/upload", response_class=HTMLResponse)

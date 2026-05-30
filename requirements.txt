@@ -3,3 +3,7 @@ uvicorn
 python-multipart
 jinja2
 pandas
+sentence-transformers
+chromadb
+google-generativeai
+groq

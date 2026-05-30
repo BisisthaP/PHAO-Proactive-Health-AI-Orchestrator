@@ -1,8 +1,12 @@
 from groq import Groq
 from embeddings import query_similar
 import pandas as pd
+import os
+from dotenv import load_dotenv
 
-GROQ_API_KEY = "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"
+load_dotenv()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 client = Groq(api_key=GROQ_API_KEY)
 

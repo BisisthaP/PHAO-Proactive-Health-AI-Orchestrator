@@ -1,7 +1,11 @@
 from groq import Groq
 from embeddings import query_similar
+import os
+from dotenv import load_dotenv
 
-GROQ_API_KEY = "add_key"
+load_dotenv()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 client = Groq(api_key=GROQ_API_KEY)
 
