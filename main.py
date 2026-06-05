@@ -92,103 +92,86 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
         flagged_count=len(flagged)
     ))
 
-
 @app.post("/preprocess", response_model=PreprocessResponse)
-async def preprocess(file: UploadFile = File(...)):
-    """
-    Full preprocessing + hybrid embedding pipeline.
-
-    Accepts an uploaded patient CSV and:
-      1. Cleans it (drop sparse columns, detect IDs/vitals/dates, fill gaps).
-      2. Loads + chunks the NICE guidelines from ``guidelines/``.
-      3. Builds a hybrid ChromaDB vector store (patient rows + NICE chunks).
-
-    Returns a structured JSON summary of the run.
-    """
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
-
-    # Save the uploaded file locally.
-    file_path = os.path.join(DATA_DIR, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    try:
+async def preprocess(file: UploadFile = File(None)):   # File is optional for HTMX
+    """Full preprocessing + NICE hybrid embedding."""
+    
+    # HTMX button case - use previously uploaded file
+    if not file or not file.filename:
+        if "current_file" not in session_store:
+            raise HTTPException(status_code=400, detail="No file available. Please upload first.")
+        file_path = session_store["current_file"]
+        filename = session_store.get("filename", "uploaded.csv")
         df = pd.read_csv(file_path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
+    else:
+        # Normal upload
+        if not file.filename.lower().endswith(".csv"):
+            raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+        
+        file_path = os.path.join(DATA_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        df = pd.read_csv(file_path)
+        filename = file.filename
 
     if df.empty:
-        raise HTTPException(status_code=400, detail="Uploaded CSV has no rows.")
+        raise HTTPException(status_code=400, detail="CSV has no rows.")
 
     try:
         from preprocessing import preprocess_patient_data
         from guidelines_loader import load_nice_guidelines
         from embeddings import build_hybrid_vectorstore
 
-        # 1. Clean + analyse the patient data.
         cleaned_df, meta = preprocess_patient_data(df)
 
-        # Persist the cleaned CSV for downstream modules (risk, dashboard).
         cleaned_path = file_path.replace(".csv", "_cleaned.csv")
         cleaned_df.to_csv(cleaned_path, index=False)
 
-        # 2. Load NICE guideline chunks.
+        # NICE + Hybrid
         nice_documents = load_nice_guidelines("guidelines")
-        guidelines_loaded = sorted({
-            d.metadata.get("guideline_name", "unknown") for d in nice_documents
-        })
+        guidelines_loaded = sorted({d.metadata.get("guideline_name", "unknown") for d in nice_documents})
 
-        # 3. Build the hybrid vector store.
         stats = build_hybrid_vectorstore(
             patient_df=cleaned_df,
             nice_documents=nice_documents,
-            patient_id_col=meta["patient_id_col"],
-        )
+            patient_id_col=meta.get("patient_id_col")
+        ) or {"patient_chunks": len(cleaned_df), "nice_chunks": len(nice_documents), "total_chunks": len(cleaned_df) + len(nice_documents)}
 
-        # Populate session state so chat / dashboard / risk endpoints work.
+        # Session update
         session_store.update({
             "current_file": file_path,
-            "filename": file.filename,
+            "filename": filename,
             "cleaned_file": cleaned_path,
             "preprocessed": True,
-            "patient_id_col": meta["patient_id_col"],
-            "patient_ids": meta["patient_ids"],
-            "important_cols": meta["vital_cols"] + (
-                [meta["patient_id_col"]] if meta["patient_id_col"] else []
-            ),
-            "descriptions": {},
-            "dropped_cols": meta["dropped_cols"],
-            "kept_cols": meta["kept_cols"],
-            "cleaned_shape": meta["cleaned_shape"],
+            "patient_id_col": meta.get("patient_id_col"),
+            "patient_ids": meta.get("patient_ids", []),
+            "important_cols": meta.get("vital_cols", []),
+            "dropped_cols": meta.get("dropped_cols", []),
+            "kept_cols": meta.get("kept_cols", []),
+            "cleaned_shape": meta.get("cleaned_shape"),
         })
 
         return PreprocessResponse(
             success=True,
-            message="Preprocessing and hybrid embedding completed successfully.",
-            filename=file.filename,
-            original_shape=list(meta["original_shape"]),
-            cleaned_shape=list(meta["cleaned_shape"]),
-            patient_id_col=meta["patient_id_col"],
-            columns_used=meta["kept_cols"],
-            dropped_columns=meta["dropped_cols"],
-            vital_columns=meta["vital_cols"],
-            date_columns=meta["date_cols"],
-            num_patient_chunks=stats["patient_chunks"],
-            num_nice_chunks=stats["nice_chunks"],
-            total_chunks=stats["total_chunks"],
+            message="✅ Preprocessing + NICE Hybrid Embedding Complete!",
+            filename=filename,
+            original_shape=list(meta.get("original_shape", (0,0))),
+            cleaned_shape=list(meta.get("cleaned_shape", (0,0))),
+            patient_id_col=meta.get("patient_id_col") or "row_index",
+            columns_used=meta.get("kept_cols", []),
+            dropped_columns=meta.get("dropped_cols", []),
+            vital_columns=meta.get("vital_cols", []),
+            date_columns=meta.get("date_cols", []),
+            num_patient_chunks=stats.get("patient_chunks", 0),
+            num_nice_chunks=stats.get("nice_chunks", 0),
+            total_chunks=stats.get("total_chunks", 0),
             guidelines_loaded=guidelines_loaded,
-            sample_patient_ids=meta["sample_patient_ids"],
+            sample_patient_ids=[str(x) for x in meta.get("sample_patient_ids", [])[:5]],
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
         import traceback
-        raise HTTPException(
-            status_code=500,
-            detail=f"Preprocessing failed: {e}\n{traceback.format_exc()}",
-        )
+        raise HTTPException(status_code=500, detail=f"Preprocessing failed: {str(e)}")
 
 
 @app.get("/status", response_class=HTMLResponse)

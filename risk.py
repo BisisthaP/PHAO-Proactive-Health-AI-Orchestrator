@@ -10,27 +10,25 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-RISK_SYSTEM_PROMPT = """You are a clinical risk assessment AI. You will be given:
-1. A specific patient's medical record
-2. Similar patient cases from the database
+RISK_SYSTEM_PROMPT = """You are a conservative clinical risk assessment AI grounded in NHS NICE guidelines.
 
-Your job is to assess the patient's health risk and return ONLY a valid JSON object with this exact structure:
+Given one patient record + similar cases, return ONLY valid JSON:
+
 {
   "risk_level": "Low" | "Medium" | "High" | "Critical",
-  "risk_score": <integer 0-100>,
-  "summary": "<2 sentence overall assessment>",
-  "risk_factors": ["<factor 1>", "<factor 2>", "<factor 3>"],
-  "protective_factors": ["<factor 1>", "<factor 2>"],
-  "recommendations": ["<rec 1>", "<rec 2>", "<rec 3>"],
-  "similar_pattern": "<1 sentence about what similar patients in the database show>"
+  "risk_score": <int 0-100>,
+  "summary": "<2 short sentences>",
+  "risk_factors": ["list of real issues from data"],
+  "protective_factors": ["list of positive factors"],
+  "nice_recommendations": ["1-3 specific NICE-aligned actions with citation like (NG136 Hypertension)"],
+  "similar_pattern": "<1 sentence>"
 }
 
 Rules:
-- Be clinically grounded and specific to the actual data values
-- risk_score: 0-25 Low, 26-50 Medium, 51-75 High, 76-100 Critical
-- risk_factors must reference actual values from the patient record
-- Never invent data not present in the record
-- Return ONLY the JSON, no markdown, no explanation
+- Be conservative. Only mark High/Critical if clear red flags (e.g. obesity + diabetes + emergency).
+- Always reference actual patient values from the record.
+- Include at least one NICE guideline citation when giving recommendations.
+- Return ONLY the JSON. No extra text.
 """
 
 
@@ -64,34 +62,24 @@ def format_record_text(record: dict) -> str:
 
 
 def assess_risk(patient_id: str, cleaned_csv_path: str, patient_id_col: str) -> dict:
-    """
-    Full risk assessment pipeline:
-    1. Fetch patient record from CSV
-    2. Query ChromaDB for similar patients
-    3. Send to Groq for structured risk assessment
-    4. Return parsed risk dict
-    """
-    # Step 1: Get patient record
     record = get_patient_record(patient_id, cleaned_csv_path, patient_id_col)
     if not record:
         return {"error": f"Patient '{patient_id}' not found in dataset."}
 
     patient_text = format_record_text(record)
 
-    # Step 2: Find similar patients from ChromaDB
+    # Similar patients
     similar = query_similar(patient_text, n_results=5)
     similar_context = "\n".join(
-        f"[Similar {i+1}]: {d['document'][:200]}"
-        for i, d in enumerate(similar)
-        if d["document"] != patient_text  # exclude self if present
+        f"[Similar {i+1}]: {d['document'][:250]}"
+        for i, d in enumerate(similar) if d["document"] != patient_text
     )
 
-    # Step 3: Groq assessment
     prompt = f"""Patient Record:
 {patient_text}
 
-Similar patients from database:
-{similar_context}
+Similar patients:
+{similar_context or "No similar cases found."}
 
 Assess this patient's risk:"""
 
@@ -103,16 +91,12 @@ Assess this patient's risk:"""
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=800
+            max_tokens=700
         )
         raw = response.choices[0].message.content.strip()
 
-        # Strip markdown fences if model adds them
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
+            raw = raw.split("```")[1].replace("json", "").strip()
 
         import json
         risk_data = json.loads(raw)
@@ -121,7 +105,7 @@ Assess this patient's risk:"""
         return risk_data
 
     except Exception as e:
-        return {"error": f"Risk assessment failed: {str(e)}", "raw": raw if "raw" in dir() else ""}
+        return {"error": f"Risk assessment failed: {str(e)}"}
 
 
 def build_risk_html(risk: dict) -> str:
