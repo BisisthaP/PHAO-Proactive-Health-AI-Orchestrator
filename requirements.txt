@@ -1,10 +1,13 @@
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
 jinja2
 pandas
 sentence-transformers
 chromadb
-langchain-core
-pypdf
 groq
+google-generativeai
+langchain
+langchain-community
+pydantic
+python-dotenv

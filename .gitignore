@@ -6,7 +6,10 @@ __pycache__/
 venv/
 env/
 
-# Generated vector store (rebuilt by /preprocess)
+# Environment
+.env
+
+# Generated vector store
 chroma_db/
 _tmp_chroma/
 

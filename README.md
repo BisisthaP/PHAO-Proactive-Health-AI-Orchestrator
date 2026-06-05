@@ -162,8 +162,8 @@ ChromaDB Vector Store (persistent)
 
 ### 1️⃣ Clone the Repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/hospital-rag.git
-cd hospital-rag
+git clone https://github.com/BisisthaP/PHAO-Proactive-Health-AI-Orchestrator.git phao
+cd phao
 ```
 
 ### 2️⃣ Install Dependencies
@@ -173,13 +173,9 @@ pip install -r requirements.txt
 
 ### 3️⃣ Add Your API Keys
 
-In `preprocessing.py`:
-```python
-GEMINI_API_KEY = "your-gemini-api-key"
+Create a `.env` file and add your API keys:
 ```
-
-In `rag.py` and `risk.py`:
-```python
+GEMINI_API_KEY = "your-gemini-api-key"
 GROQ_API_KEY = "your-groq-api-key"
 ```
 
